@@ -1,6 +1,9 @@
 # app/jobs/agent_queue.py
 
 from typing import Dict, Any, Optional
+from datetime import datetime, timezone
+import json 
+import time
 
 # NOTE: This uses synchronous 'fire-and-forget' for simplicity
 # In production, this would use a real async library like aiobotocore (SQS) or aio-pika (RabbitMQ)
@@ -26,12 +29,15 @@ class AgentQueueService:
             "project_id": project_id,
             "agent": agent_name,
             "data": task_data,
-            "queued_at": datetime.now(timezone.utc).isoformat()
+            "queued_at": datetime.now(timezone.utc).isoformat() 
         }
         
         # --- SCALABLE BOILERPLATE ---
-        # print(f"JOB_QUEUE: Publishing to {self.queue_name}: {job_payload}")
-        # In a real setup, this would be: await sqs_client.send_message(job_payload)
+        # NOTE: If we were using a real client, the serialization to string 
+        # is necessary here because the queue system (e.g., SQS) expects a string payload.
         
-        # For local testing, we just log and return success.
+        print(f"DEBUG: Job Queued (ID: {project_id}) to {self.queue_name}")
+        time.sleep(0.01) # Small delay to simulate network latency if testing synchronously
+        
+        # For local testing, we just return success.
         return True

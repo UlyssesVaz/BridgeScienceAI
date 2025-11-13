@@ -7,7 +7,12 @@ from typing import List, Optional
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
+from fastapi.concurrency import run_in_threadpool
 import json # For safely handling JSON data from Pydantic
+
+import logging
+# The logger setup in app/utils/logger.py propagates to all files
+logger = logging.getLogger(__name__)
 
 # Conceptual imports (replace with actual classes)
 from app.db.project_repository import ProjectRepository # New: Repository for DB interaction
@@ -82,6 +87,10 @@ class ProjectService:
         Returns:
             The initial Project model (202 Accepted response data).
         """
+        logger.info(
+            "Starting new project transaction", 
+            extra={"owner_id": owner_id, "goal": research_goal}
+        )
         
         # 1. Create initial Project Model & State
         project_id = str(uuid.uuid4())
@@ -91,7 +100,9 @@ class ProjectService:
 
         # Initial Audit Log entry
         initial_audit = AuditEntry(
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            # 1. immutable schema obj in schema so we stated that in pydantic
+            # 2. we want datetime obj internally 
+            timestamp=datetime.now(timezone.utc).isoformat(),  #.iso() ONLY USE FOR pydnatic INPUT
             agent="user",
             action="Project Initiated",
             current_phase="intake",
@@ -128,7 +139,7 @@ class ProjectService:
             
             # 3. Persist Project and File Metadata
             # We must use a single commit here for atomicity (Project + Files)
-            await self._repo.create_project_and_files(project, file_records)
+            await run_in_threadpool(self._repo.create_project_and_files, project, file_records)
             
             # 4. Asynchronously Trigger Agent (DECOUPLED)
             # Send the core data to the queue. The worker will process it.
@@ -139,6 +150,10 @@ class ProjectService:
                     "research_goal": research_goal,
                     "context_file_paths": [f.storage_path for f in file_records]
                 }
+            )
+            logger.info(
+            "Project created and task queued successfully", 
+            extra={"project_id": project.project_id}
             )
 
             # 5. Return the newly created Project record immediately (202 Accepted)

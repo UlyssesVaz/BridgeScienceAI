@@ -1,99 +1,53 @@
+# tests/conftest.py
+
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
+from app.main import app # Assuming app/main.py defines the app instance
+from unittest.mock import MagicMock
 
-from app.main import app
-from app.database import get_db
-from app.core.auth import get_current_user_id
-from app.database import Base
-from app.models import User
+# --- Shared Fixtures ---
 
-# --- 1. Database Setup for Testing ---
+# 1. FastAPI Test Client Fixture
+@pytest.fixture(scope="module")
+def client():
+    """Provides a TestClient instance for the FastAPI app."""
+    return TestClient(app)
 
-# Use an in-memory SQLite database for fast, isolated testing
-SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db" 
+# 2. Mock Service Fixture (Used to isolate the API tests)
+@pytest.fixture
+def mock_project_service(mocker):
+    """
+    Provides a mock version of the ProjectService for overriding 
+    the live dependency in the API tests.
+    """
+    # Create a mock instance of the service
+    mock_service = MagicMock()
+    
+    # We stub out the method called by the router
+    # project_id and other fields are needed to satisfy the response Pydantic model
+    mock_project = MagicMock(
+        project_id="test-1234", 
+        research_goal="Test Goal", 
+        next_agent="user_approval"
+    )
+    mock_service.start_new_project = mocker.AsyncMock(return_value=mock_project)
+    
+    return mock_service
 
-test_engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
-)
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
-
-@pytest.fixture(scope="session", autouse=True)
-def setup_db():
-    """Sets up and tears down the database tables for the entire test session."""
-    # Create all tables before tests run
-    Base.metadata.create_all(bind=test_engine)
+# 3. Dependency Overrides Fixture (The actual injection)
+@pytest.fixture(autouse=True)
+def override_dependencies(mock_project_service):
+    """
+    Temporarily overrides the live ProjectService dependency 
+    with the mock version for every API test.
+    """
+    from app.dependencies import get_project_service
+    
+    # CRITICAL STEP: Use FastAPI's dependency override feature
+    app.dependency_overrides[get_project_service] = lambda: mock_project_service
+    
+    # Yield control back to the test (where the test runs)
     yield
-    # Drop all tables after tests finish
-    Base.metadata.drop_all(bind=test_engine)
-
-@pytest.fixture(scope="function")
-def test_db_session():
-    """
-    Provides a clean, independent database session for each test function.
-    Rolls back transaction after test completion to ensure isolation.
-    """
-    connection = test_engine.connect()
-    transaction = connection.begin()
-    session = TestingSessionLocal(bind=connection)
-
-    # Override the app's get_db dependency to use the testing session
-    def override_get_db():
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db] = override_get_db
     
-    yield session
-
-    # Rollback and close everything
-    session.close()
-    transaction.rollback()
-    connection.close()
-
-
-# --- 2. Authentication Fixtures ---
-
-TEST_USER_ID = "test-user-f81d4"
-TEST_AUTH_TOKEN = "Bearer TEST_AUTH_TOKEN"
-
-@pytest.fixture(scope="function")
-def authenticated_user_id():
-    """Fixture to ensure a constant user ID is used for authenticated requests."""
-    return TEST_USER_ID
-
-@pytest.fixture(scope="function")
-def create_test_user(test_db_session):
-    """Ensure a user exists in the test DB before project creation."""
-    user = User(user_id=TEST_USER_ID, email="test@vlab.com", hashed_password="hashed")
-    test_db_session.add(user)
-    test_db_session.commit()
-    return user
-
-
-# --- 3. Test Client Fixture ---
-
-@pytest.fixture(scope="function")
-def client(test_db_session, authenticated_user_id, create_test_user):
-    """
-    Returns an authenticated TestClient with overridden dependencies for testing.
-    This ensures every test runs as the TEST_USER_ID against a clean database.
-    """
-    
-    # Override the app's auth dependency to skip token validation and return the fixed ID
-    def override_get_current_user_id():
-        return authenticated_user_id
-
-    # Apply the auth override
-    app.dependency_overrides[get_current_user_id] = override_get_current_user_id
-    
-    # Create the TestClient
-    with TestClient(app) as client:
-        yield client
-    
-    # Clean up overrides after testing is done
-    # Note: test_db_session fixture handles cleaning up the DB session override.
-    app.dependency_overrides.pop(get_current_user_id)
+    # CLEANUP: Remove the override after the test finishes
+    app.dependency_overrides.clear()

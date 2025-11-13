@@ -53,6 +53,7 @@ router = APIRouter()
     response_model=ProjectCreationResponse, 
 )
 async def create_project(
+    
     # Multipart Form Data (FastAPI handles parsing research_goal and files)
     research_goal: str = Form(..., description="The user's primary text prompt."),
     context_docs: Optional[List[UploadFile]] = Form(None, description="One or more context files."),
@@ -80,25 +81,29 @@ async def create_project(
             context_docs=context_docs
         )
         
-        # 2. Build the Pydantic response object
-        response_data = ProjectCreationResponse.model_validate(
-            project, 
+        # 2. Validate the ORM object into the Pydantic instance (V2 syntax)
+        # The 'ProjectCreationResponse' class must be configured with ConfigDict(from_attributes=True)
+        validated_instance = ProjectCreationResponse.model_validate(project)
+        
+        # 3. Use the correct V2 method, .model_copy(), for updating fields
+        response_data = validated_instance.model_copy(
             update={
                 "status": "accepted",
-                # Include next_agent, research_goal which come from the project ORM object
+                # IMPORTANT: DO NOT include project_id or research_goal here, 
+                # as they were loaded in Step 2.
             }
         )
         
-        # 3. Create the raw JSONResponse object to inject the Location header
+        # 4. Create the raw JSONResponse object to inject the Location header
         response = JSONResponse(
             content=response_data.model_dump(mode='json'), # Use model_dump to get the serializable dict
             status_code=status.HTTP_202_ACCEPTED
         )
         
-        # 4. Inject the standard Location header
+        # 5. Inject the standard Location header
         response.headers["Location"] = f"/api/v1/projects/{project.project_id}"
         
-        # 5. FINAL RETURN (The only one in the try block)
+        # 6. FINAL RETURN (The only one in the try block)
         return response
         
         

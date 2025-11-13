@@ -25,7 +25,7 @@ class VirtualLabState(BaseModel):
     def add_audit_entry(self, agent: str, action: str, details: Dict[str, Any]):
         """Helper to append to the lab notebook."""
         new_entry = AuditEntry(
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(timezone.utc),
             agent=agent,
             action=action,
             current_phase=self.current_phase,

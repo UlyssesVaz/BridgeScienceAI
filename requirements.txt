@@ -1,0 +1,11 @@
+# requirements.txt
+fastapi
+uvicorn
+
+#testing
+pytest
+httpx
+pytest-asyncio
+pytest-cov
+pytest-mock
+python-json-logger

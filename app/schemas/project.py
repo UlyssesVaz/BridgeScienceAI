@@ -29,7 +29,7 @@ class AuditEntry(BaseModel):
 
 class ProjectCreationRequest(BaseModel):
     """Defines the input parameters for creating a project."""
-    research_goal: str = Field(..., description="The user's primary text prompt.")
+    original_research_goal: str = Field(..., description="The user's primary text prompt.")
     # Note: We can't use this for UploadFiles in a multipart form, but it documents the intent.
 
 
@@ -41,7 +41,7 @@ class ProjectCreationResponse(BaseModel):
     Indicates project creation success and task delegation (202 Accepted logic).
     """
     project_id: str = Field(..., description="The unique ID for the new project.")
-    research_goal: str
+    original_research_goal: str
     status: Literal["accepted", "processing"] = "accepted"
     next_agent: Literal["pi_agent", "user_approval"]
     message: str = "Project accepted. AI analysis plan generation is in progress."
@@ -58,7 +58,8 @@ class VirtualLabState(BaseModel):
     """
     # Project metadata (from DB)
     project_id: str
-    research_goal: str
+    original_research_goal: str # user inputted goal
+    refined_research_goal: Optional[str] = None #ai refined goal
     
     # VirtualLabState contents (re-assembled from normalized tables)
     messages: List[ConversationMessage]
