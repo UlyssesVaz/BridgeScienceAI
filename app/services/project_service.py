@@ -1,0 +1,154 @@
+# app/services/project_service.py (REFINED)
+
+import uuid
+import shutil
+from pathlib import Path
+from typing import List, Optional
+from fastapi import UploadFile
+from sqlalchemy.orm import Session
+from datetime import datetime, timezone
+import json # For safely handling JSON data from Pydantic
+
+# Conceptual imports (replace with actual classes)
+from app.db.project_repository import ProjectRepository # New: Repository for DB interaction
+from app.jobs.agent_queue import AgentQueueService # New: Service to push tasks to a worker queue
+
+# Existing models and state (Pydantic)
+from app.db.models import Project, ProjectFile, Message, Task, AuditLogEntry
+from app.agents.base import VirtualLabState, ConversationMessage, TaskItem, AuditEntry
+
+# --- Service Helper: Storage (Conceptual/Local) ---
+
+class FileStorageService:
+    """Abstracts file storage logic (should be S3/GCS in production)."""
+    def __init__(self, base_path: str = "storage/projects"):
+        self.base_path = Path(base_path)
+
+    async def save_file(self, project_id: str, upload_file: UploadFile) -> ProjectFile:
+        """Saves uploaded file and returns a ProjectFile record."""
+        file_id = str(uuid.uuid4())
+        project_dir = self.base_path / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        
+        file_extension = Path(upload_file.filename).suffix
+        safe_filename = f"{file_id}{file_extension}"
+        storage_path = str(project_dir / safe_filename)
+        
+        # WARNING: upload_file.read() is BLOCKING. Replace with async object storage client
+        content = await upload_file.read() 
+        
+        with open(storage_path, "wb") as f:
+            f.write(content)
+            
+        return ProjectFile(
+            file_id=file_id,
+            project_id=project_id,
+            filename=upload_file.filename,
+            file_size=len(content),
+            storage_path=storage_path, # In Prod, this would be S3/GCS URL
+            file_type=upload_file.content_type or "application/octet-stream",
+            uploaded_at=datetime.now(timezone.utc)
+        )
+
+    def cleanup_project_files(self, project_id: str):
+        """Remove project directory on failure."""
+        project_dir = self.base_path / project_id
+        if project_dir.exists():
+            shutil.rmtree(project_dir)
+
+# --- Service Layer: Core Business Logic ---
+
+class ProjectService:
+    """Service layer for project operations."""
+    
+    def __init__(self, 
+                 repository: ProjectRepository, 
+                 storage_service: FileStorageService,
+                 agent_queue: AgentQueueService):
+        # Dependencies injected (IoC)
+        self._repo = repository
+        self._storage = storage_service
+        self._agent_queue = agent_queue
+    
+    async def start_new_project(
+        self,
+        owner_id: str,
+        research_goal: str,
+        context_docs: Optional[List[UploadFile]] = None
+    ) -> Project:
+        """
+        Initiates a new project: saves files, creates DB record, and queues agent task.
+        
+        Returns:
+            The initial Project model (202 Accepted response data).
+        """
+        
+        # 1. Create initial Project Model & State
+        project_id = str(uuid.uuid4())
+        
+        # The first message from the user
+        initial_message = ConversationMessage(role="user", content=research_goal)
+
+        # Initial Audit Log entry
+        initial_audit = AuditEntry(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            agent="user",
+            action="Project Initiated",
+            current_phase="intake",
+            details={"goal": research_goal}
+        )
+        
+        # Initial Virtual Lab State
+        initial_state = VirtualLabState(
+            messages=[initial_message],
+            task_list=[],
+            scratchpad={},
+            next_agent="pi_agent",
+            audit_log=[initial_audit],
+            current_phase="intake"
+        )
+        
+        # Create Project DB record (without committing yet)
+        project = Project(
+            project_id=project_id,
+            owner_id=owner_id,
+            original_research_goal=research_goal,
+            current_phase=initial_state.current_phase,
+            next_agent=initial_state.next_agent,
+        )
+        
+        # 2. Store Files and Create File Records (Transactional)
+        file_records: List[ProjectFile] = []
+        try:
+            if context_docs:
+                for upload_file in context_docs:
+                    # Note: We rely on the storage service to handle the I/O
+                    file_record = await self._storage.save_file(project_id, upload_file)
+                    file_records.append(file_record)
+            
+            # 3. Persist Project and File Metadata
+            # We must use a single commit here for atomicity (Project + Files)
+            await self._repo.create_project_and_files(project, file_records)
+            
+            # 4. Asynchronously Trigger Agent (DECOUPLED)
+            # Send the core data to the queue. The worker will process it.
+            await self._agent_queue.enqueue_agent_task(
+                project_id=project_id,
+                agent_name="pi_agent",
+                task_data={
+                    "research_goal": research_goal,
+                    "context_file_paths": [f.storage_path for f in file_records]
+                }
+            )
+
+            # 5. Return the newly created Project record immediately (202 Accepted)
+            return project
+            
+        except Exception as e:
+            # On ANY failure (DB or File Save), rollback DB and clean storage
+            self._storage.cleanup_project_files(project_id)
+            raise e
+            
+    # NOTE: The _save_state_to_db logic is now moved to the ASYNC WORKER
+    # The worker will fetch the project, run the agent, and then call a repository 
+    # method to update all related tables (Messages, Tasks, AuditLog).
