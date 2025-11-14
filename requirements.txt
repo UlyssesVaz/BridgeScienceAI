@@ -1,6 +1,15 @@
 # requirements.txt
 fastapi
 uvicorn
+redis
+rq #redis queue fastapi for workers
+sqlalchemy
+alembic
+python-dotenv
+psycopg2-binary
+pydantic
+python-multipart
+python-jose[cryptography]
 
 #testing
 pytest

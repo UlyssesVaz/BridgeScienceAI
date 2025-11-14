@@ -35,7 +35,7 @@ def get_agent_queue_service() -> AgentQueueService:
     Dependency for the Agent Queue client (Singleton pattern typically used here).
     """
     # Initialize once. Using a specific queue name for this service.
-    return AgentQueueService(queue_name="pi_agent_tasks")
+    return AgentQueueService(queue_name="agent_tasks")
 
 # --- 3. Storage Dependency (Local Dev) ---
 

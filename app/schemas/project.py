@@ -19,7 +19,7 @@ class ConversationMessage(BaseModel):
 
 class AuditEntry(BaseModel):
     # CRITICAL FIX: Ensure 'details' is a dictionary, not a generic string/Any
-    timestamp: str 
+    timestamp: datetime 
     agent: str
     action: str
     current_phase: str

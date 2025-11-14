@@ -1,47 +1,138 @@
 # app/workers/agent_worker.py
 
-from app.db.database import get_session_maker
+from typing import Dict, Any
+import os
+import asyncio
+import logging
+
+from redis import Redis
+from rq import Worker, Queue
+
+from app.database import SessionLocal
+from app.db.project_repository import ProjectRepository  # Repository handles all DB logic
+from app.agents.base import VirtualLabState  # Only domain model import needed
 from app.agents.pi_agent import PIAgent
-# from app.db.project_repository import ProjectRepository # If needed later
+
+logger = logging.getLogger(__name__)
+
 
 def process_job(project_id: str, agent_name: str, task_data: Dict[str, Any]):
     """
-    The function that runs inside the worker process to execute a single task.
+    The function that RQ will call to execute a single task.
+    This must be a synchronous function (RQ requirement).
+    
+    Responsibilities:
+    - Orchestrates the job execution flow
+    - Delegates DB access to Repository
+    - Delegates business logic to Agent
+    
+    Args:
+        project_id: The project ID to process
+        agent_name: The name of the agent to execute
+        task_data: Dictionary containing:
+            - original_research_goal: str
+            - context_file_paths: List[str]
+            - user_metadata: Dict[str, Any] with user_id, profession, institution
     """
+    logger.info(
+        f"Starting job processing",
+        extra={"project_id": project_id, "agent_name": agent_name}
+    )
     
-    # 1. Initialize dependencies (Note: The worker process has its OWN DB session)
-    # db_session = get_session_maker()
-    
-    # 2. Match the agent logic to the job
-    if agent_name == "pi_agent":
-        # 3. Instantiate the agent and run the core logic
-        pi_agent = PIAgent()
+    db = None
+    try:
+        db = SessionLocal()
         
-        # NOTE: This is where the core logic will go.
-        # It needs to fetch the Project state from the DB, run the agent, 
-        # and then save the resulting state (Tasks, Messages, AuditLog) back.
+        # 1. Initialize Repository (encapsulates ALL DB logic)
+        repository = ProjectRepository(db_session=db)
         
-        print(f"WORKER: Starting {agent_name} for Project {project_id}...")
-        # try:
-        #     initial_state = db_repo.get_initial_state(project_id)
-        #     final_state = await pi_agent.execute(initial_state, task_data)
-        #     db_repo.save_final_state(final_state)
-        # except Exception as e:
-        #     print(f"WORKER ERROR: {e}")
+        # 2. Get project state (Repository handles ORM → Pydantic conversion)
+        state = repository.get_project_state(project_id)
+        logger.debug(
+            f"VirtualLabState loaded from database",
+            extra={
+                "project_id": project_id,
+                "num_messages": len(state.messages),
+                "num_tasks": len(state.task_list),
+                "num_audit_entries": len(state.audit_log),
+                "current_phase": state.current_phase
+            }
+        )
+        
+        # 3. Extract task data
+        original_research_goal = task_data.get("original_research_goal")
+        if not original_research_goal:
+            raise ValueError("original_research_goal missing from task_data")
+        
+        user_metadata = task_data.get("user_metadata", {})
+        context_files = task_data.get("context_file_paths", [])
+        
+        # 4. Execute agent (pure business logic - no DB knowledge)
+        if agent_name == "pi_agent":
+            agent = PIAgent()
             
-    else:
-        print(f"WORKER: Unknown agent {agent_name}. Skipping.")
+            logger.info(f"Executing {agent_name} for project {project_id}")
+            final_state = asyncio.run(
+                agent.execute(
+                    state=state,
+                    original_research_goal=original_research_goal,
+                    user_metadata=user_metadata,
+                    context_files=context_files
+                )
+            )
+            
+            logger.info(
+                f"Agent execution completed",
+                extra={
+                    "project_id": project_id,
+                    "agent_name": agent_name,
+                    "num_tasks_created": len(final_state.task_list),
+                    "num_messages": len(final_state.messages),
+                    "next_agent": final_state.next_agent,
+                    "refined_goal": final_state.scratchpad.get("refined_research_goal", "N/A")[:100]
+                }
+            )
+            
+            # TODO: Phase 2 - repository.save_agent_results(project_id, final_state)
+            # This will encapsulate Pydantic → ORM conversion and persistence
+            logger.info(f"Job completed successfully (Phase 2 will save results to DB)")
+            
+        else:
+            logger.warning(f"Unknown agent: {agent_name}. Skipping.")
+            raise ValueError(f"Unknown agent: {agent_name}")
+            
+    except Exception as e:
+        logger.error(
+            f"Error processing job",
+            extra={"project_id": project_id, "agent_name": agent_name, "error": str(e)},
+            exc_info=True
+        )
+        raise
+    finally:
+        # Always close the database session if it was created
+        if db is not None:
+            db.close()
+
 
 if __name__ == '__main__':
-    # --- SCALABLE BOILERPLATE ---
-    # This block represents the main loop of the worker process, 
-    # which continuously polls the queue.
-    print("Agent Worker initialized. Listening for tasks...")
+    """
+    Main entry point for the RQ worker.
+    This worker continuously polls the Redis queue for jobs.
+    """
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    logger.info(f"Starting RQ worker for queue: agent_tasks")
+    logger.info(f"Connecting to Redis at: {redis_url}")
     
-    # Example Polling Loop:
-    # while True:
-    #     job = queue_client.poll_for_job(self.queue_name)
-    #     if job:
-    #         process_job(job['project_id'], job['agent'], job['data'])
-    #     time.sleep(1) 
-    pass
+    try:
+        redis_conn = Redis.from_url(redis_url)
+        # Test connection
+        redis_conn.ping()
+        logger.info("Redis connection successful")
+        
+        queue = Queue("agent_tasks", connection=redis_conn)
+        worker = Worker([queue], connection=redis_conn)
+        logger.info("Worker initialized. Listening for tasks...")
+        worker.work()
+    except Exception as e:
+        logger.error(f"Failed to start worker: {e}", exc_info=True)
+        raise

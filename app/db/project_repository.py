@@ -2,7 +2,9 @@
 
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from app.db.models import Project, ProjectFile # Import the SQLAlchemy models
+from app.db.models import Project, ProjectFile, Message, Task, AuditLogEntry  # Added ORM models
+from app.agents.base import VirtualLabState  # Added Pydantic domain model
+from app.schemas.project import ConversationMessage, TaskItem, AuditEntry  # Added Pydantic schemas
 
 class ProjectRepository:
     """
@@ -50,6 +52,75 @@ class ProjectRepository:
             self.db.rollback()
             # Re-raise the exception for the Service Layer to handle (e.g., clean up files)
             raise e
+    
+    def get_project_state(self, project_id: str) -> VirtualLabState:
+        """
+        Reconstructs the complete VirtualLabState from database.
+        
+        This method encapsulates ALL database access and ORM → Pydantic conversion logic.
+        The calling layer (Worker) doesn't need to know about SQLAlchemy models or conversion.
+        
+        Args:
+            project_id: The project ID to fetch state for
+            
+        Returns:
+            A complete VirtualLabState object reconstructed from database
+            
+        Raises:
+            ValueError: If project not found
+        """
+        # 1. Fetch Project (master record)
+        project = self.db.query(Project).filter(Project.project_id == project_id).first()
+        if not project:
+            raise ValueError(f"Project {project_id} not found in database")
+        
+        # 2. Fetch and convert Messages (ORM → Pydantic)
+        message_records = self.db.query(Message).filter(
+            Message.project_id == project_id
+        ).order_by(Message.created_at).all()
+        messages = [
+            ConversationMessage(role=msg.role, content=msg.content)
+            for msg in message_records
+        ]
+        
+        # 3. Fetch and convert Tasks (ORM → Pydantic)
+        task_records = self.db.query(Task).filter(
+            Task.project_id == project_id
+        ).order_by(Task.created_at).all()
+        task_list = [
+            TaskItem(
+                id=task.task_id,
+                description=task.description,
+                status=task.status,
+                result=task.result
+            )
+            for task in task_records
+        ]
+        
+        # 4. Fetch and convert Audit Log (ORM → Pydantic)
+        audit_records = self.db.query(AuditLogEntry).filter(
+            AuditLogEntry.project_id == project_id
+        ).order_by(AuditLogEntry.timestamp).all()
+        audit_log = [
+            AuditEntry(
+                timestamp=entry.timestamp.isoformat(),
+                agent=entry.agent,
+                action=entry.action,
+                current_phase=entry.current_phase,
+                details=entry.details or {}
+            )
+            for entry in audit_records
+        ]
+        
+        # 5. Reconstruct VirtualLabState (scratchpad could be stored in Project later)
+        return VirtualLabState(
+            messages=messages,
+            task_list=task_list,
+            scratchpad={},  # TODO: Could load from Project.scratchpad if we store it
+            next_agent=project.next_agent or "pi_agent",
+            audit_log=audit_log,
+            current_phase=project.current_phase
+        )
             
     # FUTURE METHODS (Just for context, not needed for Feature 1 POST)
     
