@@ -21,6 +21,8 @@ class User(Base):
     email = Column(String(255), unique=True, index=True) # Added max length for string
     hashed_password = Column(String(100)) # Added max length
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    institute = Column(String(100))
+    profession = Column(String(100)) 
     
     projects = relationship("Project", back_populates="owner", cascade="all, delete-orphan")
 

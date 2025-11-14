@@ -1,10 +1,24 @@
+##
+#  THIS HAS MOCK DATA WE NEED TO REMOVE immediately
+##
 from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 # This is the security scheme. It tells FastAPI to look
 # for the "Authorization: Bearer <token>" header.
 security = HTTPBearer()
+
+
+def get_user_test_metadata(user_id: str) -> Optional[Dict[str, Any]]:
+    """Returns test metadata for the TDD user ID."""
+    if user_id == "test-user-f81d4":
+        return {
+            "user_id": "test-user-f81d4",
+            "profession": "Senior Virologist", # Your mock data
+            "institution": "FANG Research Labs", # Your mock data
+        }
+    return None
 
 async def get_current_user_id(
     authorization: Optional[str] = Header(None) 

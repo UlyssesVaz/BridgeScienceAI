@@ -9,7 +9,15 @@ from app.db.project_repository import ProjectRepository
 from app.jobs.agent_queue import AgentQueueService
 from app.services.project_service import ProjectService
 from app.services.project_service import FileStorageService # For the service injection
+from app.db.user_repository import UserRepository # <-- NEW IMPORT
 
+# --- 0. User Repository Dependency ---
+
+def get_user_repository(db: Session = Depends(get_db)) -> UserRepository:
+    """
+    Instantiates the UserRepository, injecting the scoped DB session.
+    """
+    return UserRepository(db_session=db)
 
 # --- 1. Repository Dependency ---
 
@@ -42,6 +50,7 @@ def get_file_storage_service() -> FileStorageService:
 
 def get_project_service(
     repository: ProjectRepository = Depends(get_project_repository),
+    user_repository: UserRepository = Depends(get_user_repository),
     storage: FileStorageService = Depends(get_file_storage_service),
     queue: AgentQueueService = Depends(get_agent_queue_service)
 ) -> ProjectService:
@@ -51,6 +60,7 @@ def get_project_service(
     """
     return ProjectService(
         repository=repository,
+        user_repository=user_repository,
         storage_service=storage,
         agent_queue=queue
     )

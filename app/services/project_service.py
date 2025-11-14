@@ -4,11 +4,12 @@ import uuid
 import shutil
 from pathlib import Path
 from typing import List, Optional
-from fastapi import UploadFile
+from fastapi import UploadFile, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 from fastapi.concurrency import run_in_threadpool
 import json # For safely handling JSON data from Pydantic
+from app.db.user_repository import UserRepository # New: User Repository for user data access
 
 import logging
 # The logger setup in app/utils/logger.py propagates to all files
@@ -68,17 +69,19 @@ class ProjectService:
     
     def __init__(self, 
                  repository: ProjectRepository, 
+                 user_repository: UserRepository,
                  storage_service: FileStorageService,
                  agent_queue: AgentQueueService):
         # Dependencies injected (IoC)
         self._repo = repository
+        self._user_repo = user_repository
         self._storage = storage_service
         self._agent_queue = agent_queue
     
     async def start_new_project(
         self,
         owner_id: str,
-        research_goal: str,
+        original_research_goal: str,
         context_docs: Optional[List[UploadFile]] = None
     ) -> Project:
         """
@@ -89,14 +92,15 @@ class ProjectService:
         """
         logger.info(
             "Starting new project transaction", 
-            extra={"owner_id": owner_id, "goal": research_goal}
+            extra={"owner_id": owner_id, "goal": original_research_goal}
         )
         
+
         # 1. Create initial Project Model & State
         project_id = str(uuid.uuid4())
         
         # The first message from the user
-        initial_message = ConversationMessage(role="user", content=research_goal)
+        initial_message = ConversationMessage(role="user", content=original_research_goal)
 
         # Initial Audit Log entry
         initial_audit = AuditEntry(
@@ -106,7 +110,7 @@ class ProjectService:
             agent="user",
             action="Project Initiated",
             current_phase="intake",
-            details={"goal": research_goal}
+            details={"goal": original_research_goal}
         )
         
         # Initial Virtual Lab State
@@ -123,7 +127,7 @@ class ProjectService:
         project = Project(
             project_id=project_id,
             owner_id=owner_id,
-            original_research_goal=research_goal,
+            original_research_goal=original_research_goal,
             current_phase=initial_state.current_phase,
             next_agent=initial_state.next_agent,
         )
@@ -140,6 +144,20 @@ class ProjectService:
             # 3. Persist Project and File Metadata
             # We must use a single commit here for atomicity (Project + Files)
             await run_in_threadpool(self._repo.create_project_and_files, project, file_records)
+
+            # We must use run_in_threadpool because the UserRepository call is synchronous (blocking I/O).
+            user = await run_in_threadpool(self._user_repo.get_user_by_id, owner_id)
+            
+            if not user:
+                 # CRITICAL: Crash if user doesn't exist, as Auth passed but DB failed.
+                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found after authentication.")
+            
+            # Construct the metadata package for the AI
+            user_metadata = {
+                "user_id": user.user_id, # Always good to pass the ID for context
+                "profession": user.profession,
+                "institution": user.institute,
+            }
             
             # 4. Asynchronously Trigger Agent (DECOUPLED)
             # Send the core data to the queue. The worker will process it.
@@ -147,13 +165,14 @@ class ProjectService:
                 project_id=project_id,
                 agent_name="pi_agent",
                 task_data={
-                    "research_goal": research_goal,
-                    "context_file_paths": [f.storage_path for f in file_records]
+                    "original_research_goal": original_research_goal,
+                    "context_file_paths": [f.storage_path for f in file_records],
+                    "user_metadata": user_metadata,
                 }
             )
             logger.info(
-            "Project created and task queued successfully", 
-            extra={"project_id": project.project_id}
+                "Project created and task queued successfully", 
+                extra={"project_id": project.project_id, "user_role": user.profession}
             )
 
             # 5. Return the newly created Project record immediately (202 Accepted)

@@ -6,6 +6,8 @@ from .base import BaseAgent, VirtualLabState
 from app.schemas.project import ConversationMessage, TaskItem
 from datetime import datetime, timezone
 import uuid
+import logging
+logger = logging.getLogger(__name__)
 
 class PIAgent(BaseAgent):
     """
@@ -16,7 +18,8 @@ class PIAgent(BaseAgent):
     async def execute(
         self,
         state: VirtualLabState,
-        research_goal: str,
+        original_research_goal: str,
+        user_metadata: Dict[str, Any],
         context_files: Optional[List[Dict[str, Any]]] = None,
         **kwargs
     ) -> VirtualLabState:
@@ -28,10 +31,37 @@ class PIAgent(BaseAgent):
             research_goal: The user's goal.
             context_files: List of file metadata.
         """
+        user_role = user_metadata.get('profession', 'Scientist')
+
+        logger.debug(
+            "PI Agent execution started with user context.", 
+            extra={
+                "user_id": user_metadata.get('user_id'),
+                "profession": user_role,
+                "input_goal_len": len(original_research_goal),
+            }
+        )
         
+        # Log initial action (Audit Log Entry #2)
+        state.add_audit_entry(
+            agent="pi_agent",
+            action="planning_initiated",
+            details={
+                "user_profession": user_role,
+                "original_research_goal": original_research_goal,
+                "num_context_files": len(context_files) if context_files else 0
+            }
+        )
         
         # 1. Simulate AI Refinement (Boilerplate)
-        refined_goal = f"Validated Goal: Determine protein function given reaction pathways using {len(context_files) if context_files else 0} documents."
+        # The AI now uses the profession to set the tone!
+        refined_goal = (
+            f"Validated Goal for {user_role}: Determine protein function given reaction pathways and contextual documents "
+            f"provided by {user_metadata.get('institution', 'the user')}. (Tone adjusted for {user_role}.)"
+        )
+
+        # CRITICAL: Store the refined goal in the SCRATCHPAD
+        state.scratchpad['refined_research_goal'] = refined_goal
 
 
         # 2. Log initiation (Note: The user's initial message and intake audit are added in the Service)
@@ -39,7 +69,7 @@ class PIAgent(BaseAgent):
             agent="pi_agent",
             action="planning_initiated",
             details={
-                "research_goal": research_goal, # or should it be redfined_goal?
+                "original_research_goal": original_research_goal, # or should it be redfined_goal?
                 "num_context_files": len(context_files) if context_files else 0
             }
         )
@@ -47,10 +77,13 @@ class PIAgent(BaseAgent):
         # 2. Simulate AI Processing and Response
         
         # Add Assistant Message (The AI's response)
+        
+        # Add Assistant Message (The AI's public response)
         state.messages.append(
             ConversationMessage(
                 role="assistant",
-                content=f"Understood. Your goal is: '{research_goal}'. I've drafted an analysis plan based on the {len(context_files) if context_files else 0} documents provided."
+                # Show the refined goal to the user to prove understanding
+                content=f"Based on your domain {user_role}. I have refined your objective into the following question: '{refined_goal}'. I have drafted an initial analysis plan based on your request."
             )
         )
         
@@ -71,6 +104,7 @@ class PIAgent(BaseAgent):
             agent="pi_agent",
             action="planning_complete",
             details={
+                "refined_research_goal": refined_goal,
                 "tasks_created": len(state.task_list),
                 "next_agent": state.next_agent
             }

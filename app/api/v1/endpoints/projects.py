@@ -55,7 +55,7 @@ router = APIRouter()
 async def create_project(
     
     # Multipart Form Data (FastAPI handles parsing research_goal and files)
-    research_goal: str = Form(..., description="The user's primary text prompt."),
+    original_research_goal: str = Form(..., description="The user's primary text prompt."),
     context_docs: Optional[List[UploadFile]] = Form(None, description="One or more context files."),
     
     # Dependencies (Clean, high-level dependencies only)
@@ -67,7 +67,7 @@ async def create_project(
     that queues the AI analysis task and immediately returns an acknowledgement.
     """
     
-    if not research_goal or not research_goal.strip():
+    if not original_research_goal or not original_research_goal.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="research_goal cannot be empty"
@@ -77,7 +77,7 @@ async def create_project(
         # 1. Delegate work entirely to the Service layer
         project = await project_service.start_new_project(
             owner_id=owner_id,
-            research_goal=research_goal,
+            original_research_goal=original_research_goal,
             context_docs=context_docs
         )
         
